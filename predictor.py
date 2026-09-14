@@ -2,7 +2,7 @@
 """
 Time-series stock predictor with proper train/test split and evaluation.
 Reads AAPL.csv with at least columns: Date, Close
-Creates lag features (past n days' Close) to predict next-day Close.
+Creates lag and technical indicator features to predict next-day Close.
 """
 
 import pandas as pd
@@ -37,11 +37,22 @@ df = df[[DATE_COL, TARGET_COL]].dropna().reset_index(drop=True)
 for lag in range(1, LAGS + 1):
     df[f"lag_{lag}"] = df[TARGET_COL].shift(lag)
 
+# create technical indicators from prior closing prices
+df["SMA_7"] = df[TARGET_COL].rolling(window=7, min_periods=1).mean().shift(1)
+df["SMA_21"] = df[TARGET_COL].rolling(window=21, min_periods=1).mean().shift(1)
+df["EMA_7"] = df[TARGET_COL].ewm(span=7, adjust=False).mean().shift(1)
+df["EMA_21"] = df[TARGET_COL].ewm(span=21, adjust=False).mean().shift(1)
+
 # We want to predict CLOSE at time t using lag_1..lag_LAGS (i.e., previous days)
 df = df.dropna().reset_index(drop=True)
 
 # features and target
-feature_cols = [f"lag_{lag}" for lag in range(1, LAGS + 1)]
+feature_cols = [f"lag_{lag}" for lag in range(1, LAGS + 1)] + [
+    "SMA_7",
+    "SMA_21",
+    "EMA_7",
+    "EMA_21",
+]
 X = df[feature_cols].copy()
 y = df[TARGET_COL].copy()
 dates = df[DATE_COL].copy()
@@ -77,26 +88,33 @@ print(f"Test MSE: {mse:.4f}")
 print(f"Test MAE: {mae:.4f}")
 
 # -----------------------
-# Forecast next N days (iterative using last observed lags)
+# Forecast next N days (iterative using last observed closes)
 # -----------------------
-# Start from the last available row's lag features (most recent LAGS closes)
-last_known = df.iloc[-1][feature_cols].values.astype(float)  # shape (LAGS,)
+close_history = df[TARGET_COL].tolist()
 future_preds = []
-current_lags = last_known.copy()
 
 for i in range(PREDICT_N_DAYS):
+    current_lags = np.array(close_history[-LAGS:][::-1], dtype=float)
+    current_indicators = np.array([
+        pd.Series(close_history).rolling(
+            window=7, min_periods=1).mean().iloc[-1],
+        pd.Series(close_history).rolling(
+            window=21, min_periods=1).mean().iloc[-1],
+        pd.Series(close_history).ewm(span=7, adjust=False).mean().iloc[-1],
+        pd.Series(close_history).ewm(span=21, adjust=False).mean().iloc[-1],
+    ])
+    current_features = np.concatenate([current_lags, current_indicators])
+
     # scale using same scaler — note scaler expects shape (n_samples, n_features)
-    scaled = scaler.transform(current_lags.reshape(1, -1))
+    scaled = scaler.transform(current_features.reshape(1, -1))
     pred = model.predict(scaled)[0]
     future_preds.append(pred)
-
-    # shift lags: drop oldest, insert this prediction at lag_1 position
-    current_lags = np.roll(current_lags, 1)
-    current_lags[0] = pred  # newest becomes lag_1 for next iteration
+    close_history.append(pred)
 
 # prepare dates for the forecast
 last_date = df[DATE_COL].iloc[-1]
-future_dates = [last_date + pd.Timedelta(days=i + 1) for i in range(PREDICT_N_DAYS)]
+future_dates = [last_date + pd.Timedelta(days=i + 1)
+                for i in range(PREDICT_N_DAYS)]
 
 print("\nPredictions for next", PREDICT_N_DAYS, "days:")
 for d, p in zip(future_dates, future_preds):
@@ -111,12 +129,14 @@ plt.plot(dates_train, y_train, label="Train (actual)", linewidth=1)
 # plot test (true)
 plt.plot(dates_test, y_test, label="Test (actual)", linewidth=1)
 # plot model predictions on test set (align with dates_test)
-plt.plot(dates_test, y_pred_test, label="Test (predicted)", linestyle="--", linewidth=1)
+plt.plot(dates_test, y_pred_test, label="Test (predicted)",
+         linestyle="--", linewidth=1)
 # plot future predictions (extend plot)
-plt.plot(future_dates, future_preds, label="Future predictions", marker="o", linestyle="-")
+plt.plot(future_dates, future_preds,
+         label="Future predictions", marker="o", linestyle="-")
 plt.xlabel("Date")
 plt.ylabel("Close Price")
-plt.title("AAPL - Time-series prediction (lag features, time-based split)")
+plt.title("AAPL - Time-series prediction (technical indicators, time-based split)")
 plt.legend()
 plt.tight_layout()
 plt.show()
